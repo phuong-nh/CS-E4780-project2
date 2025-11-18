@@ -17,6 +17,89 @@ def _(mo):
     )
     return
 
+@app.cell
+def _(BAMLAdapter, OPENROUTER_API_KEY, dspy):
+    # Using OpenRouter. Switch to another LLM provider as needed
+    lm = dspy.LM(
+        model="openrouter/google/gemini-2.0-flash-001",
+        api_base="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+    dspy.configure(lm=lm, adapter=BAMLAdapter())
+    return
+
+
+@app.cell
+def _(OPENROUTER_API_KEY):
+    import requests
+    import numpy as np
+
+    def get_embedding(text: str):
+        """Call OpenRouter embedding model."""
+        url = "https://openrouter.ai/api/v1/embeddings"
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "model": "openai/text-embedding-3-small",
+            "input": text
+        }
+
+        response = requests.post(url, headers=headers, json=payload)
+        data = response.json()
+
+        return np.array(data["data"][0]["embedding"])
+
+    return get_embedding, np
+
+@app.cell
+def _(get_embedding, np):
+    import json
+
+    with open("few_shot_examples.json") as f:
+        EXAMPLE_BANK = json.load(f)
+
+    # Precompute embeddings
+    for ex in EXAMPLE_BANK:
+        ex["embedding"] = get_embedding(ex["question"]).tolist()
+
+    return EXAMPLE_BANK
+
+
+@app.cell
+def _(EXAMPLE_BANK, get_embedding, np):
+    def cosine_similarity(a, b):
+        """Compute cosine similarity between 2 vectors."""
+        a = np.array(a)
+        b = np.array(b)
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    
+    def select_few_shot_examples(user_question, k=3):
+        q_vec = get_embedding(user_question)
+
+        scored = []
+        for ex in EXAMPLE_BANK:
+            ex_vec = np.array(ex["embedding"])
+            score = cosine_similarity(q_vec, ex_vec)
+            scored.append((score, ex))
+
+        scored.sort(key=lambda x: -x[0])
+        return [ex for _, ex in scored[:k]]
+
+    def build_fewshot_prompt(selected_examples):
+        block = ""
+        for ex in selected_examples:
+            block += (
+                f"Example Question: {ex['question']}\n"
+                f"Example Cypher:\n```cypher\n{ex['cypher']}\n```\n\n"
+            )
+        return block.strip()
+
+    return select_few_shot_examples, build_fewshot_prompt
+
+
 
 @app.cell
 def _(mo):
@@ -112,16 +195,6 @@ def _(GraphSchema, Query, dspy):
     return AnswerQuestion, PruneSchema, Text2Cypher
 
 
-@app.cell
-def _(BAMLAdapter, OPENROUTER_API_KEY, dspy):
-    # Using OpenRouter. Switch to another LLM provider as needed
-    lm = dspy.LM(
-        model="openrouter/google/gemini-2.0-flash-001",
-        api_base="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-    )
-    dspy.configure(lm=lm, adapter=BAMLAdapter())
-    return
 
 
 @app.cell
@@ -197,6 +270,111 @@ def _(BaseModel, Field):
         edges: list[Edge]
     return GraphSchema, Query
 
+@app.cell
+def _(dspy, Text2Cypher, select_few_shot_examples, build_fewshot_prompt):
+
+    class DynamicText2Cypher(dspy.Module):
+        """
+        Wrap Text2Cypher to inject dynamic few-shot exemplars.
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.base = dspy.ChainOfThought(Text2Cypher)
+
+        def forward(self, question: str, input_schema: str):
+            # Pick top examples
+            selected = select_few_shot_examples(question, k=3)
+            fewshot_block = build_fewshot_prompt(selected)
+
+            enhanced_question = (
+                "Translate the question into Cypher using the graph schema.\n\n"
+                "Here are relevant examples:\n\n"
+                f"{fewshot_block}\n\n"
+                "Now translate the following question:\n"
+                f"{question}"
+            )
+
+            return self.base(question=enhanced_question, input_schema=input_schema)
+
+    return DynamicText2Cypher
+
+@app.cell
+def _(KuzuDatabaseManager):
+    def validate_cypher_syntax(db_manager: KuzuDatabaseManager, query: str):
+        """
+        Validate query using Kuzu EXPLAIN.
+        Returns: (True, None) if valid, else (False, error_message)
+        """
+        try:
+            db_manager.conn.execute(f"EXPLAIN {query}")
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    return validate_cypher_syntax
+
+@app.cell
+def _(dspy):
+    class RepairCypher(dspy.Signature):
+        """
+        Repair an invalid Cypher query using the error message.
+        Return ONLY a corrected Cypher query.
+        """
+        question: str = dspy.InputField()
+        bad_query: str = dspy.InputField()
+        error_message: str = dspy.InputField()
+        fixed_query: str = dspy.OutputField(description="Corrected Cypher query")
+
+    repair_cypher = dspy.ChainOfThought(RepairCypher)
+
+    return repair_cypher
+
+
+@app.cell
+def _(dspy, DynamicText2Cypher, validate_cypher_syntax, repair_cypher):
+    class RefinedText2Cypher:
+        """
+        Self-refinement wrapper:
+        1. Generate initial query
+        2. Validate via EXPLAIN
+        3. If invalid, repair and retry
+        """
+        def __init__(self, max_iters=3):
+            self.max_iters = max_iters
+            self.generator = DynamicText2Cypher()
+
+        def generate(self, db_manager, question, input_schema):
+            # First attempt
+            result = self.generator(question=question, input_schema=input_schema)
+            query = result.query
+
+            # Self-refinement loop
+            for _ in range(self.max_iters):
+                ok, error = validate_cypher_syntax(db_manager, query)
+                if ok:
+                    return query  # Valid query!
+
+                # Attempt repair using the repair LLM
+                repaired = repair_cypher(
+                    question=question,
+                    bad_query=query,
+                    error_message=error,
+                )
+                query = repaired.fixed_query
+
+            return query  # Return last repaired version
+
+        # ❤️ KEY FIX → Make module "callable" by DSPy
+        def __call__(self, db_manager, question, input_schema):
+            query = self.generate(db_manager, question, input_schema)
+            return type("Obj", (), {"query": query})()
+
+
+    return RefinedText2Cypher
+
+
+
 
 @app.cell
 def _(
@@ -205,7 +383,7 @@ def _(
     KuzuDatabaseManager,
     PruneSchema,
     Query,
-    Text2Cypher,
+    RefinedText2Cypher,
     dspy,
 ):
     class GraphRAG(dspy.Module):
@@ -215,42 +393,83 @@ def _(
         """
 
         def __init__(self):
+            super().__init__()
             self.prune = dspy.Predict(PruneSchema)
-            self.text2cypher = dspy.ChainOfThought(Text2Cypher)
+            self.text2cypher = RefinedText2Cypher(max_iters=3)
             self.generate_answer = dspy.ChainOfThought(AnswerQuestion)
 
-        def get_cypher_query(self, question: str, input_schema: str) -> Query:
+        def get_cypher_query(
+            self,
+            db_manager: KuzuDatabaseManager,
+            question: str,
+            input_schema: str,
+        ) -> Query:
+            # 1. Prune schema based on the question
             prune_result = self.prune(question=question, input_schema=input_schema)
-            schema = prune_result.pruned_schema
-            text2cypher_result = self.text2cypher(question=question, input_schema=schema)
-            cypher_query = text2cypher_result.query
-            return cypher_query
+            pruned_schema = prune_result.pruned_schema
+
+            # Convert pruned schema (GraphSchema Pydantic model) to JSON string
+            # so the LLM can see a clean schema representation
+            schema_str = pruned_schema.model_dump_json()
+
+            # 2. Run self-refining Text2Cypher on the pruned schema
+            t2c_result = self.text2cypher(
+                db_manager=db_manager,
+                question=question,
+                input_schema=schema_str,
+            )
+            cypher_query = t2c_result.query
+
+            # 3. Wrap in Query model (note: use keyword arg!)
+            return Query(query=cypher_query)
 
         def run_query(
-            self, db_manager: KuzuDatabaseManager, question: str, input_schema: str
+            self,
+            db_manager: KuzuDatabaseManager,
+            question: str,
+            input_schema: str,
         ) -> tuple[str, list[Any] | None]:
             """
             Run a query synchronously on the database.
             """
-            result = self.get_cypher_query(question=question, input_schema=input_schema)
-            query = result.query
+            query_model = self.get_cypher_query(
+                db_manager=db_manager,
+                question=question,
+                input_schema=input_schema,
+            )
+            query = query_model.query
+
             try:
-                # Run the query on the database
                 result = db_manager.conn.execute(query)
                 results = [item for row in result for item in row]
             except RuntimeError as e:
                 print(f"Error running query: {e}")
                 results = None
+
             return query, results
 
-        def forward(self, db_manager: KuzuDatabaseManager, question: str, input_schema: str):
-            final_query, final_context = self.run_query(db_manager, question, input_schema)
+        def forward(
+            self,
+            db_manager: KuzuDatabaseManager,
+            question: str,
+            input_schema: str,
+        ):
+            final_query, final_context = self.run_query(
+                db_manager=db_manager,
+                question=question,
+                input_schema=input_schema,
+            )
             if final_context is None:
-                print("Empty results obtained from the graph database. Please retry with a different question.")
+                print(
+                    "Empty results obtained from the graph database. "
+                    "Please retry with a different question."
+                )
                 return {}
             else:
                 answer = self.generate_answer(
-                    question=question, cypher_query=final_query, context=str(final_context)
+                    question=question,
+                    cypher_query=final_query,
+                    context=str(final_context),
                 )
                 response = {
                     "question": question,
@@ -259,14 +478,28 @@ def _(
                 }
                 return response
 
-        async def aforward(self, db_manager: KuzuDatabaseManager, question: str, input_schema: str):
-            final_query, final_context = self.run_query(db_manager, question, input_schema)
+        async def aforward(
+            self,
+            db_manager: KuzuDatabaseManager,
+            question: str,
+            input_schema: str,
+        ):
+            final_query, final_context = self.run_query(
+                db_manager=db_manager,
+                question=question,
+                input_schema=input_schema,
+            )
             if final_context is None:
-                print("Empty results obtained from the graph database. Please retry with a different question.")
+                print(
+                    "Empty results obtained from the graph database. "
+                    "Please retry with a different question."
+                )
                 return {}
             else:
                 answer = self.generate_answer(
-                    question=question, cypher_query=final_query, context=str(final_context)
+                    question=question,
+                    cypher_query=final_query,
+                    context=str(final_context),
                 )
                 response = {
                     "question": question,
@@ -274,15 +507,19 @@ def _(
                     "answer": answer,
                 }
                 return response
-
 
     def run_graph_rag(questions: list[str], db_manager: KuzuDatabaseManager) -> list[Any]:
+        # Full schema as a string for the PruneSchema signature
         schema = str(db_manager.get_schema_dict)
         rag = GraphRAG()
-        # Run pipeline
+
         results = []
         for question in questions:
-            response = rag(db_manager=db_manager, question=question, input_schema=schema)
+            response = rag(
+                db_manager=db_manager,
+                question=question,
+                input_schema=schema,
+            )
             results.append(response)
         return results
 
