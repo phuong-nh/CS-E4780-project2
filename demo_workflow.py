@@ -318,7 +318,7 @@ def _(
         enable_repair=True
     )
 
-    selected_exemplars = select_exemplars(sample_question, top_k=3)
+    selected_exemplars = select_exemplars(sample_question, top_k=5)
     exemplar_text = "\n".join([
         f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
         for i, ex in enumerate(selected_exemplars)
@@ -380,7 +380,7 @@ def _(
             enable_repair=True
         )
 
-        selected_exemplars = select_exemplars(question, top_k=3)
+        selected_exemplars = select_exemplars(question, top_k=5)
         exemplar_text = "\n".join([
             f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
             for i, ex in enumerate(selected_exemplars)

@@ -236,7 +236,7 @@ def _(
             prune_result = self.prune(question=question, input_schema=input_schema)
             schema = prune_result.pruned_schema
             
-            selected_exemplars = select_exemplars(question, top_k=3)
+            selected_exemplars = select_exemplars(question, top_k=5)
             exemplar_text = "\n".join([
                 f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
                 for i, ex in enumerate(selected_exemplars)
