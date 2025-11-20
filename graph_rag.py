@@ -72,6 +72,7 @@ def _(GraphSchema, Query, dspy):
     class Text2Cypher(dspy.Signature):
         """
         Translate the question into a valid Cypher query that respects the graph schema.
+        Use the provided examples to guide your query generation.
 
         <SYNTAX>
         - When matching on Scholar names, ALWAYS match on the `knownName` property
@@ -95,6 +96,7 @@ def _(GraphSchema, Query, dspy):
 
         question: str = dspy.InputField()
         input_schema: str = dspy.InputField()
+        examples: str = dspy.InputField(desc="Relevant examples of question-to-Cypher translations")
         query: Query = dspy.OutputField()
 
 
@@ -116,7 +118,7 @@ def _(GraphSchema, Query, dspy):
 def _(BAMLAdapter, OPENROUTER_API_KEY, dspy):
     # Using OpenRouter. Switch to another LLM provider as needed
     lm = dspy.LM(
-        model="openrouter/google/gemini-2.0-flash-001",
+        model="openrouter/tngtech/deepseek-r1t2-chimera:free",
         api_base="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
     )
@@ -207,6 +209,7 @@ def _(
     Query,
     Text2Cypher,
     dspy,
+    select_exemplars,
 ):
     class GraphRAG(dspy.Module):
         """
@@ -222,7 +225,18 @@ def _(
         def get_cypher_query(self, question: str, input_schema: str) -> Query:
             prune_result = self.prune(question=question, input_schema=input_schema)
             schema = prune_result.pruned_schema
-            text2cypher_result = self.text2cypher(question=question, input_schema=schema)
+            
+            selected_exemplars = select_exemplars(question, top_k=3)
+            exemplar_text = "\n".join([
+                f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
+                for i, ex in enumerate(selected_exemplars)
+            ])
+            
+            text2cypher_result = self.text2cypher(
+                question=question, 
+                input_schema=schema,
+                examples=exemplar_text
+            )
             cypher_query = text2cypher_result.query
             return cypher_query
 
@@ -306,6 +320,7 @@ def _():
     from dotenv import load_dotenv
     from dspy.adapters.baml_adapter import BAMLAdapter
     from pydantic import BaseModel, Field
+    from exemplar_selector import select_exemplars
 
     load_dotenv()
 
@@ -319,6 +334,7 @@ def _():
         dspy,
         kuzu,
         mo,
+        select_exemplars,
     )
 
 

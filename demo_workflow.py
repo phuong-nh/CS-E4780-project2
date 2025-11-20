@@ -124,7 +124,7 @@ def _(dspy, load_dotenv, os):
     # Using OpenRouter. Switch to another LLM provider as needed
     # we recommend gemini-2.0-flash for the cost-efficiency
     lm = dspy.LM(
-        model="openrouter/google/gemini-2.0-flash-001",
+        model="openrouter/tngtech/deepseek-r1t2-chimera:free",
         api_base="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
     )
@@ -270,6 +270,7 @@ def _(Query, dspy):
     class Text2Cypher(dspy.Signature):
         """
         Translate the question into a valid Cypher query that respects the graph schema.
+        Use the provided examples to guide your query generation.
 
         <SYNTAX>
         - When matching on Scholar names, ALWAYS match on the `knownName` property
@@ -293,15 +294,26 @@ def _(Query, dspy):
 
         question: str = dspy.InputField()
         input_schema: str = dspy.InputField()
+        examples: str = dspy.InputField(desc="Relevant examples of question-to-Cypher translations")
         query: Query = dspy.OutputField()
     return (Text2Cypher,)
 
 
 @app.cell
-def _(Text2Cypher, dspy, pruned_schema, sample_question):
+def _(Text2Cypher, dspy, pruned_schema, sample_question, select_exemplars):
     text2cypher = dspy.Predict(Text2Cypher)
 
-    text2cypher_result = text2cypher(question=sample_question, input_schema=pruned_schema)
+    selected_exemplars = select_exemplars(sample_question, top_k=3)
+    exemplar_text = "\n".join([
+        f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
+        for i, ex in enumerate(selected_exemplars)
+    ])
+
+    text2cypher_result = text2cypher(
+        question=sample_question, 
+        input_schema=pruned_schema,
+        examples=exemplar_text
+    )
     cypher_query = text2cypher_result.query.query
     cypher_query
     return (text2cypher,)
@@ -327,12 +339,22 @@ def _(mo):
 
 
 @app.cell
-def _(kuzu, text2cypher):
+def _(kuzu, select_exemplars, text2cypher):
     def run_query(conn: kuzu.Connection, question: str, input_schema: str):
         """
         Run a Cypher query on the Kuzu database and gather the results.
         """
-        text2cypher_result = text2cypher(question=question, input_schema=input_schema)
+        selected_exemplars = select_exemplars(question, top_k=3)
+        exemplar_text = "\n".join([
+            f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
+            for i, ex in enumerate(selected_exemplars)
+        ])
+
+        text2cypher_result = text2cypher(
+            question=question, 
+            input_schema=input_schema,
+            examples=exemplar_text
+        )
         query = text2cypher_result.query.query
         print(query)
         try:
@@ -414,7 +436,8 @@ def _():
     from typing import Any
     from pydantic import BaseModel, Field
     from dotenv import load_dotenv
-    return BaseModel, Field, dspy, kuzu, load_dotenv, mo, os
+    from exemplar_selector import select_exemplars
+    return BaseModel, Field, dspy, kuzu, load_dotenv, mo, os, select_exemplars
 
 
 @app.cell
