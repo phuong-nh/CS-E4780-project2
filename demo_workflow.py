@@ -300,8 +300,23 @@ def _(Query, dspy):
 
 
 @app.cell
-def _(Text2Cypher, dspy, pruned_schema, sample_question, select_exemplars):
-    text2cypher = dspy.Predict(Text2Cypher)
+def _(
+    Text2Cypher,
+    conn,
+    create_self_refining_text2cypher,
+    dspy,
+    pruned_schema,
+    sample_question,
+    select_exemplars,
+):
+    base_text2cypher = dspy.Predict(Text2Cypher)
+
+    refining_text2cypher = create_self_refining_text2cypher(
+        conn=conn,
+        text2cypher_module=base_text2cypher,
+        max_attempts=3,
+        enable_repair=True
+    )
 
     selected_exemplars = select_exemplars(sample_question, top_k=3)
     exemplar_text = "\n".join([
@@ -309,14 +324,20 @@ def _(Text2Cypher, dspy, pruned_schema, sample_question, select_exemplars):
         for i, ex in enumerate(selected_exemplars)
     ])
 
-    text2cypher_result = text2cypher(
-        question=sample_question, 
-        input_schema=pruned_schema,
+    cypher_query, query_history = refining_text2cypher.generate_and_validate(
+        question=sample_question,
+        schema=pruned_schema,
         examples=exemplar_text
     )
-    cypher_query = text2cypher_result.query.query
+
+    print(f"Final Query: {cypher_query}")
+    print(f"\nAttempts made: {len(query_history.attempts)}")
+    for attempt in query_history.attempts:
+        status = "Valid" if attempt.is_valid else f"Error: {attempt.error_message[:100] if attempt.error_message else 'Unknown'}..."
+        print(f"  Attempt {attempt.attempt_number}: {status}")
+
     cypher_query
-    return (text2cypher,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -339,26 +360,46 @@ def _(mo):
 
 
 @app.cell
-def _(kuzu, select_exemplars, text2cypher):
+def _(
+    Text2Cypher,
+    create_self_refining_text2cypher,
+    dspy,
+    kuzu,
+    select_exemplars,
+):
     def run_query(conn: kuzu.Connection, question: str, input_schema: str):
         """
         Run a Cypher query on the Kuzu database and gather the results.
         """
+        base_text2cypher = dspy.Predict(Text2Cypher)
+
+        refining_text2cypher = create_self_refining_text2cypher(
+            conn=conn,
+            text2cypher_module=base_text2cypher,
+            max_attempts=3,
+            enable_repair=True
+        )
+
         selected_exemplars = select_exemplars(question, top_k=3)
         exemplar_text = "\n".join([
             f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
             for i, ex in enumerate(selected_exemplars)
         ])
 
-        text2cypher_result = text2cypher(
-            question=question, 
-            input_schema=input_schema,
+        query, history = refining_text2cypher.generate_and_validate(
+            question=question,
+            schema=input_schema,
             examples=exemplar_text
         )
-        query = text2cypher_result.query.query
-        print(query)
+
+        if query is None:
+            print(f"Failed to generate valid query after {len(history.attempts)} attempts")
+            print(history.format_for_prompt())
+            return None, None
+
+        print(f"Query generated (after {len(history.attempts)} attempt(s)): {query}")
+
         try:
-            # Run the query on the database
             result = conn.execute(query)
             results = [item for row in result for item in row]
         except RuntimeError as e:
@@ -437,7 +478,18 @@ def _():
     from pydantic import BaseModel, Field
     from dotenv import load_dotenv
     from exemplar_selector import select_exemplars
-    return BaseModel, Field, dspy, kuzu, load_dotenv, mo, os, select_exemplars
+    from self_refining_text2cypher import create_self_refining_text2cypher
+    return (
+        BaseModel,
+        Field,
+        create_self_refining_text2cypher,
+        dspy,
+        kuzu,
+        load_dotenv,
+        mo,
+        os,
+        select_exemplars,
+    )
 
 
 @app.cell

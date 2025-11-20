@@ -208,6 +208,7 @@ def _(
     PruneSchema,
     Query,
     Text2Cypher,
+    create_self_refining_text2cypher,
     dspy,
     select_exemplars,
 ):
@@ -217,12 +218,21 @@ def _(
         on the Kuzu database, to generate a natural language response.
         """
 
-        def __init__(self):
+        def __init__(self, db_manager: KuzuDatabaseManager):
+            self.db_manager = db_manager
             self.prune = dspy.Predict(PruneSchema)
-            self.text2cypher = dspy.ChainOfThought(Text2Cypher)
+            
+            base_text2cypher = dspy.ChainOfThought(Text2Cypher)
+            self.refining_text2cypher = create_self_refining_text2cypher(
+                conn=db_manager.conn,
+                text2cypher_module=base_text2cypher,
+                max_attempts=3,
+                enable_repair=True
+            )
+            
             self.generate_answer = dspy.ChainOfThought(AnswerQuestion)
 
-        def get_cypher_query(self, question: str, input_schema: str) -> Query:
+        def get_cypher_query(self, question: str, input_schema: str) -> tuple[str | None, Any]:
             prune_result = self.prune(question=question, input_schema=input_schema)
             schema = prune_result.pruned_schema
             
@@ -232,13 +242,13 @@ def _(
                 for i, ex in enumerate(selected_exemplars)
             ])
             
-            text2cypher_result = self.text2cypher(
-                question=question, 
-                input_schema=schema,
+            query, history = self.refining_text2cypher.generate_and_validate(
+                question=question,
+                schema=schema,
                 examples=exemplar_text
             )
-            cypher_query = text2cypher_result.query
-            return cypher_query
+            
+            return query, history
 
         def run_query(
             self, db_manager: KuzuDatabaseManager, question: str, input_schema: str
@@ -246,10 +256,13 @@ def _(
             """
             Run a query synchronously on the database.
             """
-            result = self.get_cypher_query(question=question, input_schema=input_schema)
-            query = result.query
+            query, history = self.get_cypher_query(question=question, input_schema=input_schema)
+            
+            if query is None:
+                print(f"Failed to generate valid query after {len(history.attempts)} attempts")
+                return None, None
+            
             try:
-                # Run the query on the database
                 result = db_manager.conn.execute(query)
                 results = [item for row in result for item in row]
             except RuntimeError as e:
@@ -259,7 +272,7 @@ def _(
 
         def forward(self, db_manager: KuzuDatabaseManager, question: str, input_schema: str):
             final_query, final_context = self.run_query(db_manager, question, input_schema)
-            if final_context is None:
+            if final_context is None or final_query is None:
                 print("Empty results obtained from the graph database. Please retry with a different question.")
                 return {}
             else:
@@ -292,7 +305,7 @@ def _(
 
     def run_graph_rag(questions: list[str], db_manager: KuzuDatabaseManager) -> list[Any]:
         schema = str(db_manager.get_schema_dict)
-        rag = GraphRAG()
+        rag = GraphRAG(db_manager=db_manager)
         # Run pipeline
         results = []
         for question in questions:
@@ -321,6 +334,7 @@ def _():
     from dspy.adapters.baml_adapter import BAMLAdapter
     from pydantic import BaseModel, Field
     from exemplar_selector import select_exemplars
+    from self_refining_text2cypher import create_self_refining_text2cypher
 
     load_dotenv()
 
@@ -331,6 +345,7 @@ def _():
         BaseModel,
         Field,
         OPENROUTER_API_KEY,
+        create_self_refining_text2cypher,
         dspy,
         kuzu,
         mo,
