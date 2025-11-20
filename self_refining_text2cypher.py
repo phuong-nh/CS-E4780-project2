@@ -7,6 +7,7 @@ import kuzu
 import dspy
 from typing import Optional, List, Dict, Tuple
 from pydantic import BaseModel, Field
+from query_post_processor import CypherPostProcessor
 
 
 class QueryAttempt(BaseModel):
@@ -124,7 +125,8 @@ class SelfRefiningText2Cypher:
         text2cypher_module,
         validator: QueryValidator,
         max_attempts: int = 3,
-        enable_repair: bool = True
+        enable_repair: bool = True,
+        enable_post_processing: bool = True
     ):
         """
         Initialize the self-refining module.
@@ -134,19 +136,24 @@ class SelfRefiningText2Cypher:
             validator: QueryValidator instance
             max_attempts: Maximum number of repair attempts
             enable_repair: Whether to enable automatic repair
+            enable_post_processing: Whether to enable rule-based post-processing
         """
         self.text2cypher = text2cypher_module
         self.validator = validator
         self.max_attempts = max_attempts
         self.enable_repair = enable_repair
+        self.enable_post_processing = enable_post_processing
         self.repair_module = dspy.ChainOfThought(RepairQuery) if enable_repair else None
+        self.post_processor = CypherPostProcessor() if enable_post_processing else None
         
         self.stats = {
             "total_queries": 0,
             "successful_first_try": 0,
             "successful_after_repair": 0,
             "failed_after_max_attempts": 0,
-            "total_repair_attempts": 0
+            "total_repair_attempts": 0,
+            "queries_post_processed": 0,
+            "post_processing_fixed_errors": 0
         }
     
     def generate_and_validate(
@@ -181,6 +188,16 @@ class SelfRefiningText2Cypher:
             self.stats["failed_after_max_attempts"] += 1
             return None, history
         
+        if self.enable_post_processing and self.post_processor:
+            processed_query, applied_rules = self.post_processor.process(initial_query)
+            if applied_rules:
+                self.stats["queries_post_processed"] += 1
+                is_valid_before = self.validator.validate_syntax(initial_query)[0]
+                is_valid_after = self.validator.validate_syntax(processed_query)[0]
+                if not is_valid_before and is_valid_after:
+                    self.stats["post_processing_fixed_errors"] += 1
+            initial_query = processed_query
+        
         is_valid, error_message = self.validator.validate_syntax(initial_query)
         history.add_attempt(initial_query, is_valid, error_message if not is_valid else None)
         
@@ -208,6 +225,11 @@ class SelfRefiningText2Cypher:
                 )
                 
                 repaired_query = repair_result.repaired_query
+                
+                if self.enable_post_processing and self.post_processor:
+                    repaired_query, applied_rules = self.post_processor.process(repaired_query)
+                    if applied_rules:
+                        self.stats["queries_post_processed"] += 1
                 
                 is_valid, error_message = self.validator.validate_syntax(repaired_query)
                 history.add_attempt(repaired_query, is_valid, error_message if not is_valid else None)
@@ -245,7 +267,8 @@ def create_self_refining_text2cypher(
     conn: kuzu.Connection,
     text2cypher_module,
     max_attempts: int = 3,
-    enable_repair: bool = True
+    enable_repair: bool = True,
+    enable_post_processing: bool = True
 ) -> SelfRefiningText2Cypher:
     """
     Factory function to create a self-refining Text2Cypher module.
@@ -255,6 +278,7 @@ def create_self_refining_text2cypher(
         text2cypher_module: The base Text2Cypher module
         max_attempts: Maximum repair attempts
         enable_repair: Whether to enable repair
+        enable_post_processing: Whether to enable rule-based post-processing
         
     Returns:
         SelfRefiningText2Cypher instance
@@ -264,5 +288,6 @@ def create_self_refining_text2cypher(
         text2cypher_module=text2cypher_module,
         validator=validator,
         max_attempts=max_attempts,
-        enable_repair=enable_repair
+        enable_repair=enable_repair,
+        enable_post_processing=enable_post_processing
     )
