@@ -43,6 +43,7 @@ class CypherPostProcessor:
         query = self._fix_lowercase_comparisons(query, applied_rules)
         query = self._fix_string_contains(query, applied_rules)
         query = self._fix_property_names(query, applied_rules)
+        query = self._normalize_country_names(query, applied_rules)
         query = self._fix_relationship_direction(query, applied_rules)
         query = self._add_missing_return(query, applied_rules)
         
@@ -167,6 +168,29 @@ class CypherPostProcessor:
         
         if processed != query:
             applied_rules.append("fix_property_names")
+        
+        return processed
+    
+    def _normalize_country_names(self, query: str, applied_rules: List[str]) -> str:
+        """Normalize various US country name variations to USA."""
+        processed = query
+        
+        us_variations = [
+            r"(['\"])United States of America\1",
+            r"(['\"])United States\1",
+            r"(['\"])U\.S\.A\.\1",
+            r"(['\"])U\.S\.\1",
+            r"(['\"])US\1",
+            r"(['\"])America\1",
+        ]
+        
+        for pattern in us_variations:
+            new_processed = re.sub(pattern, r"\1us\1", processed, flags=re.IGNORECASE)
+            if new_processed != processed:
+                processed = new_processed
+        
+        if processed != query:
+            applied_rules.append("normalize_country_names")
         
         return processed
     

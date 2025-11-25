@@ -8,6 +8,7 @@ import dspy
 from typing import Optional, List, Dict, Tuple
 from pydantic import BaseModel, Field
 from query_post_processor import CypherPostProcessor
+from text2cypher_cache import Text2CypherLRUCache
 
 
 class QueryAttempt(BaseModel):
@@ -126,7 +127,9 @@ class SelfRefiningText2Cypher:
         validator: QueryValidator,
         max_attempts: int = 3,
         enable_repair: bool = True,
-        enable_post_processing: bool = True
+        enable_post_processing: bool = True,
+        enable_cache: bool = True,
+        cache_size: int = 1000
     ):
         """
         Initialize the self-refining module.
@@ -137,14 +140,18 @@ class SelfRefiningText2Cypher:
             max_attempts: Maximum number of repair attempts
             enable_repair: Whether to enable automatic repair
             enable_post_processing: Whether to enable rule-based post-processing
+            enable_cache: Whether to enable LRU caching of queries
+            cache_size: Maximum number of cached queries (default: 1000)
         """
         self.text2cypher = text2cypher_module
         self.validator = validator
         self.max_attempts = max_attempts
         self.enable_repair = enable_repair
         self.enable_post_processing = enable_post_processing
+        self.enable_cache = enable_cache
         self.repair_module = dspy.ChainOfThought(RepairQuery) if enable_repair else None
         self.post_processor = CypherPostProcessor() if enable_post_processing else None
+        self.cache = Text2CypherLRUCache(max_size=cache_size) if enable_cache else None
         
         self.stats = {
             "total_queries": 0,
@@ -176,6 +183,13 @@ class SelfRefiningText2Cypher:
         self.stats["total_queries"] += 1
         history = QueryHistory()
         
+        if self.enable_cache and self.cache:
+            cached_query = self.cache.get(question, schema)
+            if cached_query:
+                history.add_attempt(cached_query, True, None)
+                self.stats["successful_first_try"] += 1
+                return cached_query, history
+        
         try:
             initial_result = self.text2cypher(
                 question=question,
@@ -203,6 +217,16 @@ class SelfRefiningText2Cypher:
         
         if is_valid:
             self.stats["successful_first_try"] += 1
+            
+            if self.enable_cache and self.cache:
+                self.cache.put(
+                    question,
+                    schema,
+                    initial_query,
+                    is_valid=True,
+                    metadata={"repair_attempts": 0, "post_processing": self.enable_post_processing}
+                )
+            
             return initial_query, history
         
         if not self.enable_repair:
@@ -236,6 +260,16 @@ class SelfRefiningText2Cypher:
                 
                 if is_valid:
                     self.stats["successful_after_repair"] += 1
+                    
+                    if self.enable_cache and self.cache:
+                        self.cache.put(
+                            question,
+                            schema,
+                            repaired_query,
+                            is_valid=True,
+                            metadata={"repair_attempts": attempt_num - 1, "post_processing": self.enable_post_processing}
+                        )
+                    
                     return repaired_query, history
                 
                 current_query = repaired_query
@@ -252,15 +286,24 @@ class SelfRefiningText2Cypher:
         """Get statistics about the refinement process."""
         total = self.stats["total_queries"]
         if total == 0:
-            return self.stats
+            stats = self.stats.copy()
+            if self.enable_cache and self.cache:
+                stats["cache"] = self.cache.get_statistics()
+            return stats
         
-        return {
+        stats = {
             **self.stats,
             "first_try_success_rate": self.stats["successful_first_try"] / total,
             "repair_success_rate": self.stats["successful_after_repair"] / max(total - self.stats["successful_first_try"], 1),
             "overall_success_rate": (self.stats["successful_first_try"] + self.stats["successful_after_repair"]) / total,
             "avg_repair_attempts": self.stats["total_repair_attempts"] / max(total - self.stats["successful_first_try"], 1)
         }
+        
+        # Add cache statistics if enabled
+        if self.enable_cache and self.cache:
+            stats["cache"] = self.cache.get_statistics()
+        
+        return stats
 
 
 def create_self_refining_text2cypher(
@@ -268,7 +311,9 @@ def create_self_refining_text2cypher(
     text2cypher_module,
     max_attempts: int = 3,
     enable_repair: bool = True,
-    enable_post_processing: bool = True
+    enable_post_processing: bool = True,
+    enable_cache: bool = True,
+    cache_size: int = 1000
 ) -> SelfRefiningText2Cypher:
     """
     Factory function to create a self-refining Text2Cypher module.
@@ -279,6 +324,8 @@ def create_self_refining_text2cypher(
         max_attempts: Maximum repair attempts
         enable_repair: Whether to enable repair
         enable_post_processing: Whether to enable rule-based post-processing
+        enable_cache: Enable LRU caching of queries
+        cache_size: Maximum cache size (default: 1000)
         
     Returns:
         SelfRefiningText2Cypher instance
@@ -289,5 +336,7 @@ def create_self_refining_text2cypher(
         validator=validator,
         max_attempts=max_attempts,
         enable_repair=enable_repair,
-        enable_post_processing=enable_post_processing
+        enable_post_processing=enable_post_processing,
+        enable_cache=enable_cache,
+        cache_size=cache_size
     )
