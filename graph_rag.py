@@ -50,16 +50,30 @@ def _(KuzuDatabaseManager, mo, run_graph_rag, text_ui):
         result = run_graph_rag([question], db_manager)[0]
 
     query = result["query"]
-    answer = result["answer"].response
-    return answer, query
+    answer_pred = result["answer"]
+    timings = result.get("timings", {})
+
+    # dspy prediction object → text
+    answer = answer_pred.response if answer_pred is not None else "No answer (empty context)."
+
+    return answer, query, timings
 
 
 @app.cell
-def _(answer, mo, query):
+def _(answer, mo, query, timings):
+    # Pretty timing breakdown in ms
+    if timings:
+        timing_lines = "\n".join(
+            f"- **{stage}**: {t*1000:.1f} ms" for stage, t in timings.items()
+        )
+        timing_md = "### Timing breakdown\n" + timing_lines
+    else:
+        timing_md = "### Timing breakdown\nNo timing data."
+
     mo.hstack(
         [
-            mo.md(f"""### Query\n```{query}```"""),
-            mo.md(f"""### Answer\n{answer}"""),
+            mo.md(f"""### Query\n```cypher\n{query}\n```"""),
+            mo.md(f"""### Answer\n{answer}\n\n{timing_md}"""),
         ]
     )
     return
@@ -298,9 +312,13 @@ def _(
     KuzuDatabaseManager,
     PruneSchema,
     Query,
+    cached_t2c_result,
+    compute_hash,
     dspy,
     make_refiner,
 ):
+    import time
+
     class GraphRAG(dspy.Module):
         """
         DSPy custom module that applies Text2Cypher to generate a query and run it
@@ -318,18 +336,36 @@ def _(
             db_manager: KuzuDatabaseManager,
             question: str,
             input_schema: str,
+            timings: dict | None = None,
         ) -> Query:
+        
+            # Check LRU cache
+            key = compute_hash(question, input_schema)
+            cached = cached_t2c_result(key, None)
+            if cached is not None:
+                return Query(query=cached)
+
+            # Prune schema
+            t0 = time.perf_counter()
             prune_result = self.prune(question=question, input_schema=input_schema)
             pruned_schema = prune_result.pruned_schema
 
+            if timings is not None:
+                timings["prune"] = time.perf_counter() - t0
             schema_str = pruned_schema.model_dump_json()
-
+            
+            # Text2Cypher
+            t1 = time.perf_counter()
+            
             t2c_result = self.text2cypher(
                 db_manager=db_manager,
                 question=question,
                 input_schema=schema_str,
             )
             cypher_query = t2c_result.query
+
+            if timings is not None:
+                timings["text2cypher"] = time.perf_counter() - t1
 
             return Query(query=cypher_query)
 
@@ -338,7 +374,9 @@ def _(
             db_manager: KuzuDatabaseManager,
             question: str,
             input_schema: str,
+             timings: dict | None = None,
         ) -> tuple[str, list[Any] | None]:
+            # Generate Cypher query (already timed inside get_cypher_query)
             query_model = self.get_cypher_query(
                 db_manager=db_manager,
                 question=question,
@@ -346,12 +384,16 @@ def _(
             )
             query = query_model.query
 
+            # Execute graph query
+            t_db = time.perf_counter()
             try:
                 result = db_manager.conn.execute(query)
                 results = [item for row in result for item in row]
             except RuntimeError as e:
                 print(f"Error running query: {e}")
                 results = None
+            if timings is not None:
+                timings["db_query"] = time.perf_counter() - t_db
 
             return query, results
 
@@ -361,27 +403,38 @@ def _(
             question: str,
             input_schema: str,
         ):
+            timings: dict[str, float] = {}
+
+            # 1–3: prune + t2c + db query
+            t_total = time.perf_counter()
             final_query, final_context = self.run_query(
                 db_manager=db_manager,
                 question=question,
                 input_schema=input_schema,
+                timings=timings,
             )
             if final_context is None:
                 print(
                     "Empty results obtained from the graph database. "
                     "Please retry with a different question."
                 )
-                return {}
+                timings["total"] = time.perf_counter() - t_total
+                return {"question": question, "query": final_query, "answer": None, "timings": timings}
             else:
+                t_ans = time.perf_counter()
                 answer = self.generate_answer(
                     question=question,
                     cypher_query=final_query,
                     context=str(final_context),
                 )
+                timings["answer_generation"] = time.perf_counter() - t_ans
+
+                timings["total"] = time.perf_counter() - t_total
                 response = {
                     "question": question,
                     "query": final_query,
                     "answer": answer,
+                    "timings": timings,
                 }
                 return response
 
@@ -391,29 +444,8 @@ def _(
             question: str,
             input_schema: str,
         ):
-            final_query, final_context = self.run_query(
-                db_manager=db_manager,
-                question=question,
-                input_schema=input_schema,
-            )
-            if final_context is None:
-                print(
-                    "Empty results obtained from the graph database. "
-                    "Please retry with a different question."
-                )
-                return {}
-            else:
-                answer = self.generate_answer(
-                    question=question,
-                    cypher_query=final_query,
-                    context=str(final_context),
-                )
-                response = {
-                    "question": question,
-                    "query": final_query,
-                    "answer": answer,
-                }
-                return response
+            # For simplicity, reuse forward’s timing logic
+            return self.forward(db_manager, question, input_schema)
 
     def run_graph_rag(questions: list[str], db_manager: KuzuDatabaseManager) -> list[Any]:
         schema = str(db_manager.get_schema_dict)
@@ -431,7 +463,23 @@ def _(
 
     return (run_graph_rag,)
 
+@app.cell
+def _(mo, timings):
+    if not timings:
+        mo.md("No timing data.")
+    else:
+        total = timings.get("total", sum(timings.values()))
+        rows = []
+        for stage, t in timings.items():
+            if stage == "total":
+                continue
+            pct = (t / total) * 100 if total > 0 else 0
+            rows.append(f"{stage:18} | {'█' * int(pct/5)} {t*1000:.1f} ms ({pct:.1f}%)")
+        text = "```text\n" + "\n".join(rows) + "\n```"
+        mo.md("### Flamegraph-style view\n" + text)
+    return
 
+    
 @app.cell
 def _():
     import marimo as mo
@@ -444,6 +492,7 @@ def _():
     from dotenv import load_dotenv
     from dspy.adapters.baml_adapter import BAMLAdapter
     from pydantic import BaseModel, Field
+    from cache import compute_hash, cached_t2c_result
 
     load_dotenv()
 
@@ -454,6 +503,8 @@ def _():
         BaseModel,
         Field,
         OPENROUTER_API_KEY,
+        cached_t2c_result,
+        compute_hash,
         dspy,
         kuzu,
         mo,
