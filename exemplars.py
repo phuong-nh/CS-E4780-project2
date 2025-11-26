@@ -299,4 +299,100 @@ EXEMPLARS = [
         "question": "Find laureates who won prizes in their birth decade.",
         "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE s.birthDate IS NOT NULL AND substring(s.birthDate, 0, 3) = substring(string(p.awardYear), 0, 3) RETURN s.knownName, s.birthDate, p.awardYear LIMIT 10"
     },
+    {
+        "question": "List all scholars who won a Nobel Prize in Physics.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE toLower(p.category) CONTAINS toLower('Physics') RETURN s.knownName, p.awardYear;"
+    },
+    {
+        "question": "Which scholars won prizes in Chemistry after 1950?",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE toLower(p.category) CONTAINS toLower('chemistry') AND p.awardYear > 1950 RETURN s.knownName, p.awardYear;"
+    },
+    {
+        "question": "List all Physics laureates born in Japan.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize), (s)-[:BORN_IN]->(c:City)-[:IS_CITY_IN]->(co:Country) WHERE toLower(p.category) CONTAINS toLower('physics') AND toLower(co.name) CONTAINS 'japan' RETURN s.knownName;"
+    },
+    {
+        "question": "Which scholars died in cities located in France?",
+        "cypher": "MATCH (s:Scholar)-[:DIED_IN]->(c:City)-[:IS_CITY_IN]->(co:Country) WHERE toLower(co.name) CONTAINS 'france' RETURN s.knownName, c.name;"
+    },
+    {
+        "question": "Which scholars won a Nobel Prize before 1930?",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE p.awardYear < 1930 RETURN s.knownName, p.awardYear;"
+    },
+    {
+        "question": "Show all Nobel Prize categories and how many scholars won each.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WITH p.category AS cat, count(s) AS winners RETURN cat, winners ORDER BY winners DESC;"
+    },
+    {
+        "question": "List scholars born in cities located in Italy.",
+        "cypher": "MATCH (s:Scholar)-[:BORN_IN]->(c:City)-[:IS_CITY_IN]->(co:Country) WHERE toLower(co.name) CONTAINS 'italy' RETURN s.knownName;"
+    },
+    {
+        "question": "Which scholars won an Economics Nobel Prize?",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE toLower(p.category) CONTAINS toLower('Economics') RETURN s.knownName, p.awardYear;"
+    },
+    {
+        "question": "List cities where Physics laureates were born.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize), (s)-[:BORN_IN]->(c:City) WHERE toLower(p.category) CONTAINS toLower('Physics') RETURN DISTINCT c.name;"
+    },
+    {
+        "question": "Which institutions have hosted Nobel laureates in Medicine?",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize), (s)-[:AFFILIATED_WITH]->(i:Institution) WHERE toLower(p.category) CONTAINS toLower('Medicine') RETURN DISTINCT i.name;"
+    },
+    {
+        "question": "Show scholars who were born and died in the same country.",
+        "cypher": "MATCH (s:Scholar)-[:BORN_IN]->(bc:City)-[:IS_CITY_IN]->(bco:Country), (s)-[:DIED_IN]->(dc:City)-[:IS_CITY_IN]->(dco:Country) WHERE toLower(bco.name) = toLower(dco.name) RETURN s.knownName, bco.name;"
+    },
+    {
+        "question": "List all scholars affiliated with institutions in Scandinavia.",
+        "cypher": "MATCH (s:Scholar)-[:AFFILIATED_WITH]->(i:Institution)-[:IS_LOCATED_IN]->(c:City)-[:IS_CITY_IN]->(co:Country)-[:IS_COUNTRY_IN]->(ct:Continent) WHERE toLower(ct.name) CONTAINS 'europe' AND (toLower(co.name) CONTAINS 'sweden' OR toLower(co.name) CONTAINS 'norway' OR toLower(co.name) CONTAINS 'denmark') RETURN s.knownName, i.name;"
+    },
+    {
+        "question": "Find all prize motivations for Chemistry laureates.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE toLower(p.category) CONTAINS toLower('Chemistry') RETURN s.knownName, p.motivation;"
+    },
+    {
+        "question": "Which cities have produced the most Nobel laureates?",
+        "cypher": "MATCH (s:Scholar)-[:BORN_IN]->(c:City) WITH c.name AS city, count(s) AS num RETURN city, num ORDER BY num DESC;"
+    },
+    {
+        "question": "Find the prize amounts awarded to Economics laureates.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE toLower(p.category) CONTAINS toLower('Economics') RETURN s.knownName, p.prizeAmount;"
+    },
+    {
+        "question": "Which scholars were born in Asia?",
+        "cypher": "MATCH (s:Scholar)-[:BORN_IN]->(c:City)-[:IS_CITY_IN]->(co:Country)-[:IS_COUNTRY_IN]->(ct:Continent) WHERE toLower(ct.name) = 'asia' RETURN s.knownName;"
+    },
+    {
+        "question": "List scholars who died before 1950.",
+        "cypher": "MATCH (s:Scholar)-[:DIED_IN]->(c:City) WHERE s.deathDate < '1950-01-01' RETURN s.knownName, s.deathDate;"
+    },
+    {
+        "question": "Show all Nobel laureates and their affiliated institutions.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(:Prize), (s)-[:AFFILIATED_WITH]->(i:Institution) RETURN s.knownName, i.name;"
+    },
+    {
+        "question": "List all laureates for each category.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) RETURN p.category, collect(s.knownName);"
+    },
+    {
+        "question": "Which scholars were born in cities located in England?",
+        "cypher": "MATCH (s:Scholar)-[:BORN_IN]->(c:City)-[:IS_CITY_IN]->(co:Country) WHERE toLower(co.name) CONTAINS 'england' RETURN s.knownName;"
+    },
+    {
+        "question": "Which institutions have locations in Tokyo?",
+        "cypher": "MATCH (i:Institution)-[:IS_LOCATED_IN]->(c:City) WHERE toLower(c.name) = 'tokyo' RETURN i.name;"
+    },
+    {
+        "question": "Find scholars related to prizes awarded before 1905.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE p.awardYear < 1905 RETURN s.knownName, p.awardYear;"
+    },
+    {
+        "question": "Which cities are home to institutions with Nobel Prize winners?",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(:Prize), (s)-[:AFFILIATED_WITH]->(i:Institution)-[:IS_LOCATED_IN]->(c:City) RETURN DISTINCT c.name;"
+    },
+    {
+        "question": "List the continent of birth for Physics laureates.",
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize), (s)-[:BORN_IN]->(c:City)-[:IS_CITY_IN]->(co:Country)-[:IS_COUNTRY_IN]->(ct:Continent) WHERE toLower(p.category) CONTAINS toLower('Physics') RETURN s.knownName, ct.name;"
+    },
 ]

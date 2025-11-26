@@ -43,17 +43,18 @@ def _(KuzuDatabaseManager, mo, run_graph_rag, text_ui):
     query = result["query"]
     answer_pred = result.get("answer")
     timings = result.get("timings", {})
+    cache_stats = result.get("cache_stats", {})
 
     answer = (
         answer_pred.response
         if answer_pred is not None
         else "No answer (empty context)."
     )
-    return answer, query, timings
+    return answer, query, timings, cache_stats
 
 
 @app.cell
-def _(answer, mo, query, timings):
+def _(answer, mo, query, timings, cache_stats):
     if timings:
         timing_lines = "\n".join(
             f"- **{stage}**: {t*1000:.1f} ms" for stage, t in timings.items()
@@ -61,11 +62,21 @@ def _(answer, mo, query, timings):
         timing_md = "### Timing breakdown\n" + timing_lines
     else:
         timing_md = "### Timing breakdown\nNo timing data."
+    
+    if cache_stats:
+        hit_rate = cache_stats.get("hit_rate", 0)
+        hits = cache_stats.get("hits", 0)
+        misses = cache_stats.get("misses", 0)
+        size = cache_stats.get("current_size", 0)
+        max_size = cache_stats.get("max_size", 0)
+        cache_md = f"\n\n### Cache Statistics\n- **Hit Rate**: {hit_rate:.1%}\n- **Hits/Misses**: {hits}/{misses}\n- **Cache Size**: {size}/{max_size}"
+    else:
+        cache_md = ""
 
     mo.hstack(
         [
             mo.md(f"""### Query\n```{query}```"""),
-            mo.md(f"""### Answer\n{answer}\n\n{timing_md}"""),
+            mo.md(f"""### Answer\n{answer}\n\n{timing_md}{cache_md}"""),
         ]
     )
     return
@@ -342,11 +353,15 @@ def _(
             timings["answer_generation"] = time.perf_counter() - t_answer
             timings["total"] = time.perf_counter() - t_total
 
+            pipeline_stats = self.refining_text2cypher.get_stats()
+            cache_stats = pipeline_stats.get("cache", {})
+
             response = {
                 "question": question,
                 "query": final_query,
                 "answer": answer,
                 "timings": timings,
+                "cache_stats": cache_stats,
             }
             return response
 
