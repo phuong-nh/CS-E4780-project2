@@ -315,7 +315,10 @@ def _(
         conn=conn,
         text2cypher_module=base_text2cypher,
         max_attempts=3,
-        enable_repair=True
+        enable_repair=True,
+        enable_post_processing=True,
+        enable_cache=True,
+        cache_size=100
     )
 
     selected_exemplars = select_exemplars(sample_question, top_k=5)

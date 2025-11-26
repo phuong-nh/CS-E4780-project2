@@ -129,7 +129,7 @@ class SelfRefiningText2Cypher:
         enable_repair: bool = True,
         enable_post_processing: bool = True,
         enable_cache: bool = True,
-        cache_size: int = 1000
+        cache_size: int = 100
     ):
         """
         Initialize the self-refining module.
