@@ -5,6 +5,7 @@ Implements generate -> validate -> repair cycle with history tracking.
 
 import kuzu
 import dspy
+import time
 from typing import Optional, List, Dict, Tuple
 from pydantic import BaseModel, Field
 from query_post_processor import CypherPostProcessor
@@ -167,7 +168,8 @@ class SelfRefiningText2Cypher:
         self,
         question: str,
         schema: str,
-        examples: str
+        examples: str,
+        timings: Optional[Dict[str, float]] = None
     ) -> Tuple[Optional[str], QueryHistory]:
         """
         Generate a Cypher query and validate it, with automatic repair if needed.
@@ -176,6 +178,7 @@ class SelfRefiningText2Cypher:
             question: The user's question
             schema: The graph schema
             examples: Formatted exemplar examples
+            timings: Optional dict to store timing information
             
         Returns:
             Tuple of (final_query, history)
@@ -183,13 +186,24 @@ class SelfRefiningText2Cypher:
         self.stats["total_queries"] += 1
         history = QueryHistory()
         
-        if self.enable_cache and self.cache:
+        if timings is None:
+            timings = {}
+        
+        # Cache lookup
+        t_cache_start = time.perf_counter()
+        if self.enable_cache and self.cache is not None:
             cached_query = self.cache.get(question, schema)
             if cached_query:
+                timings["cache_lookup"] = time.perf_counter() - t_cache_start
+                timings["cache_hit"] = True
                 history.add_attempt(cached_query, True, None)
                 self.stats["successful_first_try"] += 1
                 return cached_query, history
+        timings["cache_lookup"] = time.perf_counter() - t_cache_start
+        timings["cache_hit"] = False
         
+        # Initial query generation
+        t_gen_start = time.perf_counter()
         try:
             initial_result = self.text2cypher(
                 question=question,
@@ -201,7 +215,10 @@ class SelfRefiningText2Cypher:
             history.add_attempt("", False, f"Generation failed: {str(e)}")
             self.stats["failed_after_max_attempts"] += 1
             return None, history
+        timings["llm_generation"] = time.perf_counter() - t_gen_start
         
+        # Post-processing
+        t_post_start = time.perf_counter()
         if self.enable_post_processing and self.post_processor:
             processed_query, applied_rules = self.post_processor.process(initial_query)
             if applied_rules:
@@ -211,14 +228,18 @@ class SelfRefiningText2Cypher:
                 if not is_valid_before and is_valid_after:
                     self.stats["post_processing_fixed_errors"] += 1
             initial_query = processed_query
+        timings["post_processing"] = time.perf_counter() - t_post_start
         
+        # Validation
+        t_val_start = time.perf_counter()
         is_valid, error_message = self.validator.validate_syntax(initial_query)
+        timings["validation"] = time.perf_counter() - t_val_start
         history.add_attempt(initial_query, is_valid, error_message if not is_valid else None)
         
         if is_valid:
             self.stats["successful_first_try"] += 1
             
-            if self.enable_cache and self.cache:
+            if self.enable_cache and self.cache is not None:
                 self.cache.put(
                     question,
                     schema,
@@ -236,10 +257,14 @@ class SelfRefiningText2Cypher:
         current_query = initial_query
         current_error = error_message
         
+        repair_timings = []
         for attempt_num in range(2, self.max_attempts + 1):
             self.stats["total_repair_attempts"] += 1
             
+            t_repair_start = time.perf_counter()
             try:
+                # Repair generation
+                t_repair_gen = time.perf_counter()
                 repair_result = self.repair_module(
                     original_question=question,
                     graph_schema=schema,
@@ -249,19 +274,37 @@ class SelfRefiningText2Cypher:
                 )
                 
                 repaired_query = repair_result.repaired_query
+                repair_gen_time = time.perf_counter() - t_repair_gen
                 
+                # Post-processing repair
+                t_repair_post = time.perf_counter()
                 if self.enable_post_processing and self.post_processor:
                     repaired_query, applied_rules = self.post_processor.process(repaired_query)
                     if applied_rules:
                         self.stats["queries_post_processed"] += 1
+                repair_post_time = time.perf_counter() - t_repair_post
                 
+                # Validation
+                t_repair_val = time.perf_counter()
                 is_valid, error_message = self.validator.validate_syntax(repaired_query)
+                repair_val_time = time.perf_counter() - t_repair_val
+                
+                repair_total_time = time.perf_counter() - t_repair_start
+                repair_timings.append({
+                    "attempt": attempt_num,
+                    "llm_repair": repair_gen_time,
+                    "post_processing": repair_post_time,
+                    "validation": repair_val_time,
+                    "total": repair_total_time
+                })
+                
                 history.add_attempt(repaired_query, is_valid, error_message if not is_valid else None)
                 
                 if is_valid:
                     self.stats["successful_after_repair"] += 1
+                    timings["repair_attempts"] = repair_timings
                     
-                    if self.enable_cache and self.cache:
+                    if self.enable_cache and self.cache is not None:
                         self.cache.put(
                             question,
                             schema,
@@ -280,6 +323,8 @@ class SelfRefiningText2Cypher:
                 break
         
         self.stats["failed_after_max_attempts"] += 1
+        if repair_timings:
+            timings["repair_attempts"] = repair_timings
         return None, history
     
     def get_stats(self) -> Dict:
@@ -287,7 +332,7 @@ class SelfRefiningText2Cypher:
         total = self.stats["total_queries"]
         if total == 0:
             stats = self.stats.copy()
-            if self.enable_cache and self.cache:
+            if self.enable_cache and self.cache is not None:
                 stats["cache"] = self.cache.get_statistics()
             return stats
         
@@ -299,8 +344,8 @@ class SelfRefiningText2Cypher:
             "avg_repair_attempts": self.stats["total_repair_attempts"] / max(total - self.stats["successful_first_try"], 1)
         }
         
-        # Add cache statistics if enabled
-        if self.enable_cache and self.cache:
+        # Add cache statistics if enabled (use 'is not None' since empty cache has __len__ = 0)
+        if self.enable_cache and self.cache is not None:
             stats["cache"] = self.cache.get_statistics()
         
         return stats

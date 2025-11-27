@@ -72,16 +72,17 @@ class Text2CypherLRUCache:
     
     def _generate_key(self, question: str, schema: str) -> str:
         """
-        Generate a cache key from question and schema.
+        Generate a cache key from question only.
+        Schema is not included to allow cache hits even when pruned schema varies.
         
         Args:
             question: The user question
-            schema: The graph schema string
+            schema: The graph schema string (not used in key, kept for API compatibility)
             
         Returns:
-            SHA256 hash of the combined input
+            SHA256 hash of the normalized question
         """
-        normalized = f"{question.strip().lower()}||{schema.strip()}"
+        normalized = question.strip().lower()
         return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
     
     def _encode_question(self, question: str) -> Optional[np.ndarray]:
@@ -126,10 +127,12 @@ class Text2CypherLRUCache:
     ) -> Optional[Tuple[str, CacheEntry, float]]:
         """
         Find semantically similar cache entry.
+        Schema match is not required since questions should map to similar queries
+        regardless of minor schema variations from pruning.
         
         Args:
             question: The question to match
-            schema: The schema (must match exactly)
+            schema: The schema (not used for filtering)
             embedding: Question embedding
             
         Returns:
@@ -142,8 +145,8 @@ class Text2CypherLRUCache:
         best_similarity = 0.0
         
         for key, entry in self.cache.items():
-            if entry.schema != schema.strip():
-                continue
+            # Removed exact schema match requirement to allow cache hits
+            # even when pruned schema varies slightly between runs
             
             if entry.embedding is None:
                 continue

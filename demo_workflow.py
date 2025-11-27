@@ -124,9 +124,10 @@ def _(dspy, load_dotenv, os):
     # Using OpenRouter. Switch to another LLM provider as needed
     # we recommend gemini-2.0-flash for the cost-efficiency
     lm = dspy.LM(
-        model="openrouter/tngtech/deepseek-r1t2-chimera:free",
+        model="openrouter/google/gemini-2.5-flash-lite",
         api_base="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
+        max_tokens=100000,
     )
     dspy.configure(lm=lm)
     return
@@ -490,7 +491,6 @@ def _():
         kuzu,
         load_dotenv,
         mo,
-        os,
         select_exemplars,
     )
 

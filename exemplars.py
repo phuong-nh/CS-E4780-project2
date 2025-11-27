@@ -125,7 +125,7 @@ EXEMPLARS = [
     },
     {
         "question": "Which prizes did Albert Einstein win?",
-        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE toLower(s.knownName) CONTAINS 'einstein' RETURN p.category, p.awardYear, p.motivation"
+        "cypher": "MATCH (s:Scholar)-[:WON]->(p:Prize) WHERE toLower(s.knownName) CONTAINS 'einstein' RETURN p"
     },
     {
         "question": "How many prizes were awarded in all categories?",

@@ -149,9 +149,10 @@ def _(GraphSchema, Query, dspy):
 def _(BAMLAdapter, OPENROUTER_API_KEY, dspy):
     # Using OpenRouter. Switch to another LLM provider as needed
     lm = dspy.LM(
-        model="openrouter/tngtech/deepseek-r1t2-chimera:free",
+        model="openrouter/google/gemini-2.5-flash-lite",
         api_base="https://openrouter.ai/api/v1",
         api_key=OPENROUTER_API_KEY,
+        max_tokens=100000,
     )
     dspy.configure(lm=lm, adapter=BAMLAdapter())
     return
@@ -281,20 +282,26 @@ def _(
             if timings is not None:
                 timings["prune"] = time.perf_counter() - t_prune_start
             
+            t_exemplar_start = time.perf_counter()
             selected_exemplars = select_exemplars(question, top_k=5)
             exemplar_text = "\n".join([
                 f"Example {i+1}:\nQuestion: {ex['question']}\nCypher: {ex['cypher']}\n"
                 for i, ex in enumerate(selected_exemplars)
             ])
+            if timings is not None:
+                timings["exemplar_selection"] = time.perf_counter() - t_exemplar_start
             
-            t_t2c_start = time.perf_counter()
+            # Create a sub-dict for text2cypher internal timings
+            t2c_timings = {}
             query, history = self.refining_text2cypher.generate_and_validate(
                 question=question,
                 schema=schema,
-                examples=exemplar_text
+                examples=exemplar_text,
+                timings=t2c_timings
             )
             if timings is not None:
-                timings["text2cypher"] = time.perf_counter() - t_t2c_start
+                # Store text2cypher breakdown
+                timings["text2cypher_breakdown"] = t2c_timings
             
             return query, history
 
