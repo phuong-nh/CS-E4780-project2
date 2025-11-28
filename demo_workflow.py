@@ -116,7 +116,7 @@ def _(mo):
 
 
 @app.cell
-def _(dspy, load_dotenv, os):
+def _(dspy, load_dotenv):
     load_dotenv()
 
     OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")

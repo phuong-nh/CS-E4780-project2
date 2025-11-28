@@ -145,8 +145,8 @@ class Text2CypherLRUCache:
         best_similarity = 0.0
         
         for key, entry in self.cache.items():
-            # Removed exact schema match requirement to allow cache hits
-            # even when pruned schema varies slightly between runs
+            if entry.schema != schema.strip():
+                continue
             
             if entry.embedding is None:
                 continue
